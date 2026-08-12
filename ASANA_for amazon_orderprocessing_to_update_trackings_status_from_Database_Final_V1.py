@@ -1,267 +1,301 @@
 import requests
 import mysql.connector
 
-# ============================================
-# CONFIG
-# ============================================
+# =====================================================
+# CONFIGURATION
+# =====================================================
 
-ASANA_TOKEN = "2/xxxxxxx1"
+ASANA_TOKEN = "token"
+PROJECT_ID = "1212835434239570"
 
 SECTION_IDS = {
-    "1212808697694742": "In Processing",
-    "1212808697694741": "New orders"
+    "1212808697694741": "New Orders",
+    "1212808697694742": "In Processing"
 }
 
-FULFILLED_ENUM_ID = "1212808697694754"
+LABEL_CREATED_SECTION_ID = "1213610555237617"
+FULFILLED_SECTION_ID = "1212808697694743"
+
+# =====================================================
+# CUSTOM FIELD IDS
+# =====================================================
+
+LAST_MILE_FIELD_ID = "1211932673075094"
+FIRST_MILE_FIELD_ID = "1211908268997914"
 
 TRACKING_UPDATED_FIELD_ID = "1212924453496694"
 TRACKING_YES_ENUM_ID = "1212924453496695"
-TRACKING_NO_ENUM_ID = "1212924453496696"
 
-# 🔥 NEW FIELD (Replace with your actual GID)
+ORDER_STATUS_FIELD_ID = "1212836496066940"
+FULFILLED_ENUM_ID = "1212808697694754"
+
 SHIPPED_FROM_FIELD_ID = "1213449649079983"
+SHIPPED_DATE_FIELD_ID = "1211978742850054"
 
-USA_WAREHOUSES = {749617, 749619, 749620}
-OTHER_WAREHOUSES = {749637, 749638, 749639, 749640, 749641, 749643}
+# =====================================================
+# DATABASE CONFIG
+# =====================================================
 
 db_config = {
-    "host": "1xxxxx",
-    "user": "xxxxxx",
-    "password": "xxxxxxxx",
-    "database": "sxxxxxx"
+    "host": "host",
+    "user": "user",
+    "password": "password",
+    "database": "databasename"
 }
 
+# =====================================================
+# CONNECTIONS
+# =====================================================
 
 headers = {
-    "Authorization": f"Bearer {ASANA_TOKEN}"
+    "Authorization": f"Bearer {ASANA_TOKEN}",
+    "Content-Type": "application/json"
 }
-
-# ============================================
-# DB CONNECTION
-# ============================================
 
 conn = mysql.connector.connect(**db_config)
 cursor = conn.cursor(buffered=True)
 
-# ============================================
-# 🔥 PRELOAD WAREHOUSE LOCATIONS (FAST)
-# ============================================
-
-def preload_warehouse_locations():
-
-    cursor.execute("SELECT id, Location FROM StoreId")
-    rows = cursor.fetchall()
-
-    # Keep everything as string
-    return {str(id_): location for id_, location in rows}
-
-
-# ============================================
-# GET TASKS
-# ============================================
+# =====================================================
+# ASANA HELPERS
+# =====================================================
 
 def get_tasks_from_section(section_id):
-
-    url = (
-        f"https://app.asana.com/api/1.0/sections/{section_id}/tasks"
-        f"?opt_fields=name,custom_fields.name,custom_fields.gid,custom_fields.text_value"
-    )
-
-    all_tasks = []
+    """Fetch all tasks from a section"""
+    url = f"https://app.asana.com/api/1.0/sections/{section_id}/tasks?opt_fields=custom_fields.name,custom_fields.text_value"
+    tasks = []
 
     while url:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+        res = requests.get(url, headers=headers)
+        res.raise_for_status()
+        data = res.json()
+        tasks.extend(data["data"])
+        url = data.get("next_page", {}).get("uri")
 
-        all_tasks.extend(data["data"])
-        next_page = data.get("next_page")
-        url = next_page["uri"] if next_page else None
-
-    return all_tasks
+    return tasks
 
 
-# ============================================
-# BULK HEADER FETCH
-# ============================================
+def move_task_to_section(task_id, section_id):
+    """Move task to another section"""
+    url = f"https://app.asana.com/api/1.0/sections/{section_id}/addTask"
+    payload = {"data": {"task": task_id, "project": PROJECT_ID}}
 
-def get_header_data(order_numbers):
+    res = requests.post(url, headers=headers, json=payload)
+    print("Move Task Status:", res.status_code)
 
+# =====================================================
+# DATABASE FUNCTIONS
+# =====================================================
+
+def get_order_header_data(order_numbers):
+    """Fetch last mile, warehouse, shipdate"""
     if not order_numbers:
         return {}
 
-    format_strings = ','.join(['%s'] * len(order_numbers))
-
     query = f"""
-        SELECT ordernumber, trackingnumber, warehouseid
-        FROM shipped_orders_header
-        WHERE ordernumber IN ({format_strings})
+    SELECT ordernumber, trackingnumber, warehouseid, shipdate
+    FROM shipped_orders_header
+    WHERE ordernumber IN ({','.join(['%s'] * len(order_numbers))})
     """
 
     cursor.execute(query, tuple(order_numbers))
     rows = cursor.fetchall()
 
-    return {
-        str(ordernumber): (trackingnumber, int(warehouseid))
-        for ordernumber, trackingnumber, warehouseid in rows
-    }
+    result = {}
+    for row in rows:
+        result[str(row[0])] = {
+            "tracking": row[1],
+            "warehouse_id": row[2],
+            "shipdate": row[3]
+        }
 
+    return result
 
-# ============================================
-# BULK FIRST MILE FETCH
-# ============================================
 
 def get_first_mile_data(order_numbers):
-
+    """Fetch first mile tracking"""
     if not order_numbers:
         return {}
 
-    format_strings = ','.join(['%s'] * len(order_numbers))
-
     query = f"""
-        SELECT orderitemid, trackingnumber FROM tbl_stocktransfer
-        WHERE orderitemid IN ({format_strings})
-        UNION
-        SELECT orderitemid, trackingnumber FROM tbl_stock_intransit
-        WHERE orderitemid IN ({format_strings})
+    SELECT orderitemid, trackingnumber FROM tbl_stocktransfer
+    WHERE orderitemid IN ({','.join(['%s'] * len(order_numbers))})
+    UNION ALL
+    SELECT orderitemid, trackingnumber FROM tbl_stock_intransit
+    WHERE orderitemid IN ({','.join(['%s'] * len(order_numbers))})
     """
 
     cursor.execute(query, tuple(order_numbers) * 2)
-    rows = cursor.fetchall()
 
-    firstmile_map = {}
-    for orderitemid, trackingnumber in rows:
-        firstmile_map.setdefault(str(orderitemid), trackingnumber)
-
-    return firstmile_map
+    return {str(r[0]): r[1] for r in cursor.fetchall() if r[1]}
 
 
-# ============================================
-# UPDATE TASK
-# ============================================
+def get_warehouse_location(warehouse_id):
+    """Get warehouse location name"""
+    if not warehouse_id:
+        return None
 
-def update_task(task_id, payload):
+    query = "SELECT Location FROM StoreId WHERE Id = %s"
+    cursor.execute(query, (warehouse_id,))
+    row = cursor.fetchone()
+
+    return row[0] if row else None
+
+# =====================================================
+# MAIN UPDATE FUNCTION
+# =====================================================
+
+def update_task_all_fields(task_id, last_mile=None, first_mile=None,
+                           warehouse_id=None, shipped_date=None,
+                           mark_fulfilled=False):
+
+    payload = {"custom_fields": {}}
+
+    # Last Mile
+    if last_mile:
+        payload["custom_fields"][LAST_MILE_FIELD_ID] = str(last_mile)
+
+    # First Mile
+    if first_mile:
+        payload["custom_fields"][FIRST_MILE_FIELD_ID] = str(first_mile)
+
+    # Shipped From
+    if warehouse_id:
+        location = get_warehouse_location(warehouse_id)
+        print("Warehouse:", warehouse_id, "| Location:", location)
+
+        if location:
+            payload["custom_fields"][SHIPPED_FROM_FIELD_ID] = location
+
+    # Shipped Date
+    if shipped_date:
+        payload["custom_fields"][SHIPPED_DATE_FIELD_ID] = {
+            "date": shipped_date.strftime("%Y-%m-%d")
+        }
+
+    # Mark Fulfilled
+    if mark_fulfilled:
+        payload["custom_fields"][ORDER_STATUS_FIELD_ID] = FULFILLED_ENUM_ID
+        payload["custom_fields"][TRACKING_UPDATED_FIELD_ID] = TRACKING_YES_ENUM_ID
+
+    # API CALL
     url = f"https://app.asana.com/api/1.0/tasks/{task_id}"
-    response = requests.put(url, headers=headers, json={"data": payload})
-    response.raise_for_status()
+    res = requests.put(url, headers=headers, json={"data": payload})
 
+    print("\n=== UPDATE TASK ===")
+    print("Payload:", payload)
 
-# ============================================
-# MAIN
-# ============================================
+    if res.status_code == 200:
+        print("✅ Task updated successfully")
+    else:
+        print("❌ Update failed:", res.status_code, res.text)
 
-def main():
+# =====================================================
+# STEP 1: NEW + IN PROCESSING
+# =====================================================
 
-    overall_total = 0
-    overall_updated = 0
+def process_new_and_processing():
 
-    # 🔥 preload locations once
-    warehouse_locations = preload_warehouse_locations()
+    print("\n=== STEP 1: NEW + IN PROCESSING ===")
 
-    print("\n========== START FAST PROCESS ==========\n")
-
-    for section_id, section_name in SECTION_IDS.items():
-
-        print(f"\n--- Processing Section: {section_name} ---\n")
+    for section_id in SECTION_IDS:
 
         tasks = get_tasks_from_section(section_id)
-        overall_total += len(tasks)
+        task_order_map = {}
 
-        order_map = {}
-        field_map = {}
-
+        # Extract order numbers
         for task in tasks:
-
-            task_id = task["gid"]
-            task_name = task["name"]
-
-            order_number = None
-            lastmile_field = None
-            firstmile_field = None
-            orderstatus_field = None
+            order = None
 
             for field in task["custom_fields"]:
-                name = field["name"].strip().lower()
+                if field["name"].lower() == "order number":
+                    order = field.get("text_value")
 
-                if name == "order number":
-                    order_number = field.get("text_value")
-                elif name == "last mile tracking":
-                    lastmile_field = field["gid"]
-                elif name == "first mile tracking":
-                    firstmile_field = field["gid"]
-                elif name == "order status":
-                    orderstatus_field = field["gid"]
+            if order:
+                task_order_map[task["gid"]] = order.strip("# ")
 
-            if order_number:
-                clean = order_number.lstrip("#").strip()
-                order_map[task_id] = clean
-                field_map[task_id] = (
-                    task_name,
-                    lastmile_field,
-                    firstmile_field,
-                    orderstatus_field
+        # Fetch DB data
+        header_data = get_order_header_data(list(task_order_map.values()))
+
+        # Process each task
+        for task_id, order in task_order_map.items():
+
+            data = header_data.get(order)
+
+            last_mile = data["tracking"] if data else None
+            warehouse_id = data["warehouse_id"] if data else None
+            shipdate = data["shipdate"] if data else None
+
+            print(f"\nTask {task_id} | Order {order}")
+            print("Last Mile:", last_mile)
+
+            if last_mile:
+                print("➡ Updating LAST MILE + SHIPPING + Moving")
+
+                update_task_all_fields(
+                    task_id,
+                    last_mile=last_mile,
+                    warehouse_id=warehouse_id,
+                    shipped_date=shipdate
                 )
 
-        if not order_map:
-            continue
-
-        order_numbers = list(order_map.values())
-
-        header_data = get_header_data(order_numbers)
-        firstmile_data = get_first_mile_data(order_numbers)
-
-        section_updated = 0
-
-        for task_id, order_number in order_map.items():
-
-            task_name, lastmile_field, firstmile_field, orderstatus_field = field_map[task_id]
-
-            if order_number not in header_data:
-                continue
-
-            trackingnumber, warehouseid = header_data[order_number]
-            warehouse_name = warehouse_locations.get(str(warehouseid), "Unknown")
-
-            payload = {"custom_fields": {}}
-
-            # Insert warehouse name in Shipped_from
-            payload["custom_fields"][SHIPPED_FROM_FIELD_ID] = warehouse_name
-
-            # USA warehouse
-            if warehouseid in USA_WAREHOUSES:
-
-                payload["custom_fields"][lastmile_field] = trackingnumber
-                payload["custom_fields"][firstmile_field] = "went from usa"
-                payload["custom_fields"][orderstatus_field] = FULFILLED_ENUM_ID
-                payload["custom_fields"][TRACKING_UPDATED_FIELD_ID] = TRACKING_YES_ENUM_ID
-
-            elif warehouseid in OTHER_WAREHOUSES:
-
-                payload["custom_fields"][lastmile_field] = trackingnumber
-
-                if order_number in firstmile_data:
-                    payload["custom_fields"][firstmile_field] = firstmile_data[order_number]
-                    payload["custom_fields"][TRACKING_UPDATED_FIELD_ID] = TRACKING_YES_ENUM_ID
-                else:
-                    payload["custom_fields"][TRACKING_UPDATED_FIELD_ID] = TRACKING_NO_ENUM_ID
-
-                payload["custom_fields"][orderstatus_field] = FULFILLED_ENUM_ID
-
+                move_task_to_section(task_id, LABEL_CREATED_SECTION_ID)
             else:
-                continue
+                print("❌ No last mile yet")
 
-            update_task(task_id, payload)
-            section_updated += 1
-            overall_updated += 1
+# =====================================================
+# STEP 2: LABEL CREATED
+# =====================================================
 
-            print(f"{task_id} | {task_name} → Updated")
+def process_label_created():
 
-        print(f"\nSection Updated: {section_updated}")
+    print("\n=== STEP 2: LABEL CREATED ===")
 
-    print("\n========== FINAL SUMMARY ==========")
-    print(f"Total Tasks Checked : {overall_total}")
-    print(f"Total Orders Updated: {overall_updated}")
-    print("====================================\n")
+    tasks = get_tasks_from_section(LABEL_CREATED_SECTION_ID)
+    task_order_map = {}
+
+    for task in tasks:
+        order = None
+
+        for field in task["custom_fields"]:
+            if field["name"].lower() == "order number":
+                order = field.get("text_value")
+
+        if order:
+            task_order_map[task["gid"]] = order.strip("# ")
+
+    first_mile_data = get_first_mile_data(list(task_order_map.values()))
+
+    for task_id, order in task_order_map.items():
+
+        first_mile = first_mile_data.get(order)
+
+        print(f"\nTask {task_id} | Order {order}")
+        print("First Mile:", first_mile)
+
+        if first_mile:
+            print("➡ Updating FIRST MILE + Marking Fulfilled")
+
+            update_task_all_fields(
+                task_id,
+                first_mile=first_mile,
+                mark_fulfilled=True
+            )
+
+            move_task_to_section(task_id, FULFILLED_SECTION_ID)
+        else:
+            print("⏳ Waiting for first mile")
+
+# =====================================================
+# MAIN
+# =====================================================
+
+def main():
+    print("\n========= START =========")
+
+    process_new_and_processing()
+    process_label_created()
+
+    print("\n========= DONE =========")
 
     cursor.close()
     conn.close()
