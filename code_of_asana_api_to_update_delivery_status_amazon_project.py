@@ -6,30 +6,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # ============================================
 
-ASANA_TOKEN = "2/1xxxxxxxxxx"
-SECTION_ID = "12128086xxxxxx"
+ASANA_TOKEN = "2/xxxxxxxxxx"
+SECTION_ID = "1212808697694743" #can get this ids from asana token
 
 # ---------- ASANA FIELD IDS ----------
 
-LAST_MILE_TRACKING = "1211932673075094"
+LAST_MILE_TRACKING = "1211932673075094" #unique number of this field
 
-DELIVERY_STATUS_FIELD = "1211976264687531"
-DELIVERY_STATUS_DELIVERED = "1211976264687534"
+DELIVERY_STATUS_FIELD = "1211976264687531" #unique number of this field
+DELIVERY_STATUS_DELIVERED = "1211976264687534" #unique number of this field
 
-ORDER_STATUS_FIELD = "1212836496066940"
-ORDER_STATUS_DELIVERED = "1212808697694755"
+ORDER_STATUS_FIELD = "1212836496066940" #unique number of this field
+ORDER_STATUS_DELIVERED = "1212808697694755" #unique number of this field
 
-DELIVERED_DATE_FIELD = "1212924709673143"
+DELIVERED_DATE_FIELD = "1212924709673143" #unique number of this field
 
 MAX_THREADS = 10
 
 # ---------- DATABASE ----------
 
 db_config = {
-    "host": "18xxxx",
-    "user": "dxxxx",
-    "password": "xxxx",
-    "database": "stoxxxx"
+    "host": "HOST",
+    "user": "USER",
+    "password": "PASSWORD",
+    "database": "DATABASE"
 }
 
 # ---------- SESSION ----------
